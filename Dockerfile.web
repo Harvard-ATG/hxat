@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 \
+    DJANGO_SETTINGS_MODULE=hxat.settings.ecs
+
+COPY hxat/requirements hxat/requirements
+RUN pip install --no-cache-dir uv==0.13.7 \
+    && printf 'psycopg2-binary>=2.9.9\n' > /tmp/override.txt \
+    && uv pip install --system --no-cache -r hxat/requirements/aws.txt --override /tmp/override.txt \
+    && uv pip install --system --no-cache gunicorn==26.2.0 "uvicorn[standard]==0.54.0"
+
+COPY . .
+RUN rm -f hxat/settings/.env
+
+# collectstatic creates app.log as root; remove it so the app user can create its own.
+# health.txt is a target for load balancer health checks. WhiteNoise serves it from STATIC_ROOT.
+RUN DJANGO_SECRET_KEY=build-only python manage.py collectstatic --noinput \
+    && rm -f app.log \
+    && printf 'ok\n' > http_static/health.txt
+
+# The app writes app.log in /app, and gunicorn writes under the user's home.
+RUN useradd --system --create-home hxat \
+    && chown hxat /app
+USER hxat
+
+EXPOSE 8000
+CMD ["gunicorn", "hxat.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "60", "--access-logfile", "-"]
